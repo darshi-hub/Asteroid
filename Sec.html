@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Neon Horizon: Asteroid Shooter</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Courier New', Courier, monospace;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        #game-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 2;
+            pointer-events: none; /* Let clicks pass through to canvas */
+        }
+
+        .hud-text {
+            color: #fff;
+            text-shadow: 0 0 10px #0ff;
+            position: absolute;
+            font-weight: bold;
+        }
+
+        #score-display {
+            top: 20px;
+            left: 20px;
+            font-size: 24px;
+        }
+
+        #controls-hint {
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            font-size: 14px;
+            opacity: 0.7;
+        }
+
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 3;
+            pointer-events: auto;
+            transition: opacity 0.3s;
+        }
+
+        h1 {
+            color: #f0f;
+            text-shadow: 0 0 20px #f0f, 0 0 40px #f0f;
+            font-size: 4rem;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            text-align: center;
+            line-height: 1;
+        }
+
+        button {
+            background: transparent;
+            color: #0ff;
+            border: 2px solid #0ff;
+            padding: 15px 40px;
+            font-size: 1.5rem;
+            font-family: inherit;
+            cursor: pointer;
+            text-transform: uppercase;
+            box-shadow: 0 0 15px #0ff;
+            transition: all 0.2s;
+            margin-top: 20px;
+        }
+
+        button:hover {
+            background: #0ff;
+            color: #000;
+            box-shadow: 0 0 30px #0ff;
+        }
+
+        .hidden {
+            opacity: 0;
+            pointer-events: none !important;
+        }
+    </style>
+    
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="game-container"></div>
+
+    <div id="ui-layer">
+        <div id="score-display" class="hud-text">SCORE: 0</div>
+        <div id="controls-hint" class="hud-text">MOUSE/TOUCH to Move &bull; CLICK/TAP/SPACE to Shoot</div>
+    </div>
+
+    <div id="overlay">
+        <h1>Neon Horizon</h1>
+        <p style="color: #ccc; margin-bottom: 20px;">Avoid debris. Destroy obstacles.</p>
+        <button id="start-btn">Initialize</button>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        // --- CONFIGURATION ---
+        const COLORS = {
+            background: 0x050510,
+            ship: 0x00ffff,     // Cyan
+            shipEngine: 0xff00aa, // Hot Pink
+            asteroid: 0xaa00ff, // Deep Purple
+            laser: 0xccff00,    // Electric Lime
+            star: 0xffffff
+        };
+
+        const SETTINGS = {
+            shipSpeed: 0.15,
+            laserSpeed: 2.0,
+            asteroidBaseSpeed: 0.5,
+            spawnRate: 60, // frames
+            boundaryX: 18,
+            boundaryY: 10
+        };
+
+        // --- GLOBAL VARIABLES ---
+        let scene, camera, renderer, composer;
+        let player;
+        let score = 0;
+        let frameCount = 0;
+        let isGameOver = true;
+        let difficultyMultiplier = 1.0;
+
+        // Object Pools
+        const lasers = [];
+        const laserPool = [];
+        const asteroids = [];
+        const particles = [];
+        const particlePool = [];
+
+        // Input State
+        const mousePos = new THREE.Vector2();
+        const targetPos = new THREE.Vector2();
+        
+        // DOM Elements
+        const scoreEl = document.getElementById('score-display');
+        const overlayEl = document.getElementById('overlay');
+        const startBtn = document.getElementById('start-btn');
+        const h1El = overlayEl.querySelector('h1');
+
+        // --- INIT ---
+        function init() {
+            // 1. Scene Setup
+            const container = document.getElementById('game-container');
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(COLORS.background);
+            scene.fog = new THREE.FogExp2(COLORS.background, 0.015); // Distance fog
+
+            // 2. Camera (Third Person fixed)
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 3, 15);
+            camera.lookAt(0, 0, -10);
+
+            // 3. Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: false }); // Bloom handles AA visuals mostly
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Limit pixel ratio for performance
+            renderer.toneMapping = THREE.ReinhardToneMapping;
+            container.appendChild(renderer.domElement);
+
+            // 4. Post-Processing (Bloom)
+            const renderScene = new RenderPass(scene, camera);
+            
+            // Resolution, Strength, Radius, Threshold
+            const bloomPass = new UnrealBloomPass(
+                new THREE.Vector2(window.innerWidth, window.innerHeight),
+                1.5, 0.4, 0.1
+            );
+
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderScene);
+            composer.addPass(bloomPass);
+
+            // 5. Lighting
+            const ambientLight = new THREE.AmbientLight(0x404040, 2);
+            scene.add(ambientLight);
+
+            // 6. Environment (Starfield)
+            createStarfield();
+
+            // 7. Player
+            createPlayer();
+
+            // 8. Event Listeners
+            window.addEventListener('resize', onWindowResize);
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('touchmove', onTouchMove, { passive: false });
+            
+            // Shooting controls
+            document.addEventListener('click', shoot);
+            document.addEventListener('touchstart', (e) => {
+                // Determine if it's a tap to shoot or start of drag
+                shoot();
+            }, { passive: false });
+            document.addEventListener('keydown', (e) => {
+                if (e.code === 'Space') shoot();
+            });
+
+            startBtn.addEventListener('click', startGame);
+
+            // Start Loop
+            animate();
+        }
+
+        // --- ENTITY CREATION ---
+
+        function createStarfield() {
+            const geometry = new THREE.BufferGeometry();
+            const count = 2000;
+            const posArray = new Float32Array(count * 3);
+            
+            for(let i = 0; i < count * 3; i++) {
+                posArray[i] = (Math.random() - 0.5) * 200; // Spread wide
+            }
+            
+            geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+            const material = new THREE.PointsMaterial({
+                size: 0.2,
+                color: COLORS.star,
+                transparent: true,
+                opacity: 0.8
+            });
+            
+            const starMesh = new THREE.Points(geometry, material);
+            scene.add(starMesh);
+            
+            // Animate stars slightly in the loop by moving the group or creating a tunnel effect
+            starMesh.name = "starfield";
+        }
+
+        function createPlayer() {
+            // Geometric Ship (Retro style)
+            const geometry = new THREE.ConeGeometry(0.8, 2, 4);
+            geometry.rotateX(Math.PI / 2); // Point forward
+            
+            // Wireframe Neon Look
+            const material = new THREE.MeshBasicMaterial({ 
+                color: COLORS.ship, 
+                wireframe: true 
+            });
+
+            // Inner core for glow
+            const coreGeometry = new THREE.ConeGeometry(0.7, 1.8, 4);
+            coreGeometry.rotateX(Math.PI / 2);
+            const coreMaterial = new THREE.MeshBasicMaterial({
+                color: 0x000000
+            });
+
+            player = new THREE.Group();
+            
+            const wireframeMesh = new THREE.Mesh(geometry, material);
+            const coreMesh = new THREE.Mesh(coreGeometry, coreMaterial);
+            
+            // Engine glow
+            const engineGeo = new THREE.BoxGeometry(0.4, 0.1, 0.4);
+            const engineMat = new THREE.MeshBasicMaterial({ color: COLORS.shipEngine });
+            const engine = new THREE.Mesh(engineGeo, engineMat);
+            engine.position.z = 1;
+
+            player.add(coreMesh);
+            player.add(wireframeMesh);
+            player.add(engine);
+
+            scene.add(player);
+            resetPlayer();
+        }
+
+        function createAsteroid() {
+            // Procedural generation
+            const radius = 0.8 + Math.random() * 0.8;
+            const detail = 0;
+            const geometry = new THREE.IcosahedronGeometry(radius, detail);
+            
+            const material = new THREE.MeshBasicMaterial({ 
+                color: COLORS.asteroid, 
+                wireframe: true 
+            });
+
+            const mesh = new THREE.Mesh(geometry, material);
+            
+            // Random start position
+            mesh.position.x = (Math.random() - 0.5) * (SETTINGS.boundaryX * 2);
+            mesh.position.y = (Math.random() - 0.5) * (SETTINGS.boundaryY * 1.5); // slightly tighter Y
+            mesh.position.z = -50; // Start far away
+
+            // Random rotation speed
+            mesh.userData = {
+                rotSpeed: {
+                    x: Math.random() * 0.05,
+                    y: Math.random() * 0.05
+                },
+                radius: radius,
+                velocityZ: (SETTINGS.asteroidBaseSpeed + (Math.random() * 0.2)) * difficultyMultiplier
+            };
+
+            scene.add(mesh);
+            asteroids.push(mesh);
+        }
+
+        function getLaser() {
+            if (laserPool.length > 0) {
+                const laser = laserPool.pop();
+                laser.visible = true;
+                return laser;
+            }
+            
+            const geometry = new THREE.CapsuleGeometry(0.1, 1.5, 4, 8);
+            geometry.rotateX(Math.PI / 2);
+            const material = new THREE.MeshBasicMaterial({ color: COLORS.laser });
+            const mesh = new THREE.Mesh(geometry, material);
+            scene.add(mesh);
+            return mesh;
+        }
+
+        function getParticle() {
+            if (particlePool.length > 0) {
+                const p = particlePool.pop();
+                p.visible = true;
+                return p;
+            }
+            const geometry = new THREE.TetrahedronGeometry(0.1 + Math.random()*0.2);
+            const material = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true });
+            const mesh = new THREE.Mesh(geometry, material);
+            scene.add(mesh);
+            return mesh;
+        }
+
+        function createExplosion(position, color) {
+            const particleCount = 12;
+            for (let i = 0; i < particleCount; i++) {
+                const p = getParticle();
+                p.position.copy(position);
+                p.material.color.setHex(color);
+                p.material.opacity = 1;
+                
+                // Random velocity vector
+                p.userData = {
+                    velocity: new THREE.Vector3(
+                        (Math.random() - 0.5) * 0.5,
+                        (Math.random() - 0.5) * 0.5,
+                        (Math.random() - 0.5) * 0.5
+                    ),
+                    life: 1.0
+                };
+                particles.push(p);
+            }
+        }
+
+        // --- GAME LOGIC ---
+
+        function startGame() {
+            overlayEl.classList.add('hidden');
+            isGameOver = false;
+            score = 0;
+            difficultyMultiplier = 1.0;
+            updateScore();
+            resetPlayer();
+            
+            // Clear existing entities
+            asteroids.forEach(a => { scene.remove(a); });
+            asteroids.length = 0;
+            lasers.forEach(l => { l.visible = false; laserPool.push(l); });
+            lasers.length = 0;
+        }
+
+        function resetPlayer() {
+            player.position.set(0, 0, 0);
+            targetPos.set(0, 0);
+            player.rotation.set(0, 0, 0);
+        }
+
+        function gameOver() {
+            isGameOver = true;
+            h1El.innerText = "CRITICAL FAILURE";
+            startBtn.innerText = "REBOOT SYSTEM";
+            overlayEl.classList.remove('hidden');
+            createExplosion(player.position, COLORS.ship);
+        }
+
+        function shoot(e) {
+            if (isGameOver) return;
+            // Prevent double firing on touch devices that simulate click
+            if (e && e.type === 'touchstart') e.preventDefault(); 
+
+            const laser = getLaser();
+            laser.position.copy(player.position);
+            // Move start slightly forward so it doesn't clip camera/ship weirdly
+            laser.position.z -= 1.0; 
+            lasers.push(laser);
+        }
+
+        function updatePlayer() {
+            // Smoothly interpolate current position to target position (mouse/touch)
+            player.position.x += (targetPos.x - player.position.x) * 0.1;
+            player.position.y += (targetPos.y - player.position.y) * 0.1;
+
+            // Clamp bounds
+            player.position.x = Math.max(Math.min(player.position.x, SETTINGS.boundaryX), -SETTINGS.boundaryX);
+            player.position.y = Math.max(Math.min(player.position.y, SETTINGS.boundaryY), -SETTINGS.boundaryY);
+
+            // Dynamic Banking (Roll) based on movement
+            const bankAngle = (targetPos.x - player.position.x) * -0.1;
+            player.rotation.z = THREE.MathUtils.lerp(player.rotation.z, bankAngle, 0.1);
+        }
+
+        function updateLasers() {
+            for (let i = lasers.length - 1; i >= 0; i--) {
+                const l = lasers[i];
+                l.position.z -= SETTINGS.laserSpeed;
+
+                if (l.position.z < -60) {
+                    l.visible = false;
+                    laserPool.push(l);
+                    lasers.splice(i, 1);
+                }
+            }
+        }
+
+        function updateAsteroids() {
+            // Spawning
+            if (frameCount % Math.floor(SETTINGS.spawnRate / difficultyMultiplier) === 0) {
+                createAsteroid();
+            }
+
+            for (let i = asteroids.length - 1; i >= 0; i--) {
+                const a = asteroids[i];
+                a.position.z += a.userData.velocityZ;
+                a.rotation.x += a.userData.rotSpeed.x;
+                a.rotation.y += a.userData.rotSpeed.y;
+
+                // Cleanup if passed player
+                if (a.position.z > 10) {
+                    scene.remove(a);
+                    asteroids.splice(i, 1);
+                    continue;
+                }
+
+                // Collision: Asteroid vs Player
+                const distToPlayer = a.position.distanceTo(player.position);
+                if (distToPlayer < (a.userData.radius + 0.5)) { // 0.5 approx ship radius
+                    gameOver();
+                }
+
+                // Collision: Asteroid vs Lasers
+                for (let j = lasers.length - 1; j >= 0; j--) {
+                    const l = lasers[j];
+                    if (a.position.distanceTo(l.position) < a.userData.radius + 0.5) {
+                        // HIT
+                        createExplosion(a.position, COLORS.asteroid);
+                        
+                        // Recycle Laser
+                        l.visible = false;
+                        laserPool.push(l);
+                        lasers.splice(j, 1);
+
+                        // Remove Asteroid
+                        scene.remove(a);
+                        asteroids.splice(i, 1);
+
+                        score += 10;
+                        updateScore();
+                        break; // Stop checking lasers for this asteroid
+                    }
+                }
+            }
+        }
+
+        function updateParticles() {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.position.add(p.userData.velocity);
+                p.userData.life -= 0.03;
+                p.material.opacity = p.userData.life;
+                p.rotation.x += 0.1;
+
+                if (p.userData.life <= 0) {
+                    p.visible = false;
+                    particlePool.push(p);
+                    particles.splice(i, 1);
+                }
+            }
+        }
+
+        function updateScore() {
+            scoreEl.innerText = `SCORE: ${score}`;
+            // Increase difficulty slightly every 100 points
+            difficultyMultiplier = 1 + (score / 500);
+        }
+
+        // --- RENDER LOOP ---
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (!isGameOver) {
+                updatePlayer();
+                updateLasers();
+                updateAsteroids();
+                updateParticles();
+                frameCount++;
+            } else if (particles.length > 0) {
+                // Continue showing explosion if game is over
+                updateParticles();
+            }
+
+            // Move starfield for speed illusion
+            const stars = scene.getObjectByName('starfield');
+            if (stars) {
+                stars.rotation.z += 0.001;
+            }
+
+            composer.render();
+        }
+
+        // --- INPUT HANDLERS ---
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function onMouseMove(event) {
+            // Normalize mouse position -1 to 1
+            const x = (event.clientX / window.innerWidth) * 2 - 1;
+            const y = -(event.clientY / window.innerHeight) * 2 + 1;
+            
+            // Map to world coordinates
+            targetPos.x = x * SETTINGS.boundaryX;
+            targetPos.y = y * SETTINGS.boundaryY;
+        }
+
+        function onTouchMove(event) {
+            event.preventDefault(); // Prevent scrolling
+            const touch = event.touches[0];
+            const x = (touch.clientX / window.innerWidth) * 2 - 1;
+            const y = -(touch.clientY / window.innerHeight) * 2 + 1;
+            
+            targetPos.x = x * SETTINGS.boundaryX;
+            targetPos.y = y * SETTINGS.boundaryY;
+        }
+
+        // Boot
+        init();
+
+    </script>
+</body>
+</html>
